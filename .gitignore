@@ -1,0 +1,14 @@
+# Ambiente e Segurança
+.env
+*.db
+*.db-journal
+
+# Arquivos de dados
+/inbox/*
+/outbox/*
+*.csv
+*.csv.processado
+
+# Binários
+/bin
+/AegisStream
