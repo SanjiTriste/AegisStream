@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath" // NOVO: Pacote para lidar com caminhos de pastas
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,32 +18,98 @@ import (
 	"github.com/SanjiTriste/AegisStream/internal/load"
 	"github.com/SanjiTriste/AegisStream/internal/transform"
 	"github.com/SanjiTriste/AegisStream/pkg/logger"
+	"github.com/fsnotify/fsnotify"
 )
 
 func main() {
-	caminhoCSV := flag.String("csv", "", "Caminho do arquivo CSV de entrada")
-	flag.Parse()
-
 	log := logger.New()
 	cfg := config.CarregarConfiguracoes()
 
-	if *caminhoCSV == "" {
-		fmt.Println("Erro: Caminho do arquivo nao informado. Uso: go run cmd/etl/main.go -csv=vendas_reais.csv")
+	if err := os.MkdirAll("inbox", 0755); err != nil {
+		log.Error("Falha ao criar pasta inbox", "erro", err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll("outbox", 0755); err != nil {
+		log.Error("Falha ao criar pasta outbox", "erro", err)
 		os.Exit(1)
 	}
 
-	log.Info("Iniciando AegisStream ETL", "arquivo", *caminhoCSV, "workers", cfg.WorkerCount)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Error("Falha ao iniciar watcher", "erro", err)
+		os.Exit(1)
+	}
+	defer watcher.Close()
+
+	// Debounce — evita processar o mesmo arquivo duas vezes
+	// (o fsnotify dispara múltiplos eventos no Windows)
+	var (
+		debounce   = make(map[string]time.Time)
+		debounceMu sync.Mutex
+	)
+
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+					if strings.ToLower(filepath.Ext(event.Name)) != ".csv" {
+						continue
+					}
+
+					// Ignora se o mesmo arquivo foi processado nos últimos 2 segundos
+					debounceMu.Lock()
+					ultima, visto := debounce[event.Name]
+					if visto && time.Since(ultima) < 2*time.Second {
+						debounceMu.Unlock()
+						continue
+					}
+					debounce[event.Name] = time.Now()
+					debounceMu.Unlock()
+
+					log.Info("CSV detetado, a iniciar processamento...", "arquivo", event.Name)
+					executarETL(ctx, event.Name, cfg, log)
+				}
+
+			case <-ctx.Done():
+				return
+
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Error("Erro no monitor", "erro", err)
+			}
+		}
+	}()
+
+	if err := watcher.Add("./inbox"); err != nil {
+		log.Error("Falha ao vigiar pasta inbox", "erro", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("AegisStream Ativo! A aguardar CSVs na pasta ./inbox...")
+	fmt.Println("Pressione Ctrl+C para encerrar.")
+
+	<-ctx.Done()
+	log.Info("Sinal recebido. AegisStream a encerrar...")
+}
+
+func executarETL(ctx context.Context, caminhoCSV string, cfg config.AppConfig, log *slog.Logger) {
 	start := time.Now()
 
 	db, err := load.InicializarBanco()
 	if err != nil {
 		log.Error("Falha critica ao iniciar banco", "erro", err)
-		os.Exit(1)
+		return
 	}
 	defer db.Close()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	jobs := make(chan domain.RegistroBruto, 1000)
 	cleanJobs := make(chan domain.RegistroVarejo, 1000)
@@ -57,27 +124,20 @@ func main() {
 		go transform.WorkerPool(w, cfg, jobs, cleanJobs, log, &wgWorkers)
 	}
 
-	go extract.LeitorCSV(ctx, *caminhoCSV, jobs, log)
+	go extract.LeitorCSV(ctx, caminhoCSV, jobs, log)
 
 	wgWorkers.Wait()
 	close(cleanJobs)
 	wgLoader.Wait()
 
-	// ==========================================
-	// NOVO: Movendo o arquivo para a pasta outbox
-	// ==========================================
-
-	// Pega apenas o nome do arquivo (ex: extrai "vendas_reais.csv" de "C:/pasta/vendas_reais.csv")
-	nomeArquivo := filepath.Base(*caminhoCSV)
-
-	// Monta o caminho de destino apontando para a pasta outbox
+	nomeArquivo := filepath.Base(caminhoCSV)
 	caminhoDestino := filepath.Join("outbox", nomeArquivo+".processado")
 
-	if err := os.Rename(*caminhoCSV, caminhoDestino); err == nil {
-		log.Info("Arquivo fonte movido para outbox com sucesso", "caminho_destino", caminhoDestino)
+	if err := os.Rename(caminhoCSV, caminhoDestino); err == nil {
+		log.Info("Ficheiro processado e movido para outbox", "destino", caminhoDestino)
 	} else {
-		log.Error("Falha ao mover arquivo para outbox", "erro", err)
+		log.Error("Falha ao mover ficheiro", "erro", err)
 	}
 
-	log.Info("AegisStream Finalizado", "tempo_execucao_ms", time.Since(start).Milliseconds())
+	log.Info("Processamento Finalizado", "tempo_ms", time.Since(start).Milliseconds())
 }

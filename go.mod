@@ -2,7 +2,10 @@ module github.com/SanjiTriste/AegisStream
 
 go 1.26.3
 
-require modernc.org/sqlite v1.50.1
+require (
+	github.com/fsnotify/fsnotify v1.10.1
+	modernc.org/sqlite v1.50.1
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

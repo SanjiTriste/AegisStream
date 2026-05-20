@@ -37,9 +37,12 @@ flowchart TD
     D2 ==>|Sanitized & Encrypted| F
     D3 ==>|Sanitized & Encrypted| F
     
+    ```markdown
     F --> G(Phase 3: Load)
     G -->|Batch Insert| H[(Database: SQLite/PgSQL)]
     H -.->|Idempotency: ON CONFLICT| H
+```
+
 
     Key Engineering Decisions:
 Streaming Extraction: The file is read line-by-line (encoding/csv). The application's memory footprint is bound only to the line currently in transit, allowing infinite file processing.

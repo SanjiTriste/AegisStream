@@ -14,25 +14,49 @@ func WorkerPool(id int, cfg config.AppConfig, jobs <-chan domain.RegistroBruto, 
 	defer wg.Done()
 
 	for raw := range jobs {
-		idadeStr := strings.TrimSpace(raw.Dados[7])
-		idade, err := strconv.Atoi(idadeStr)
-		if err != nil {
-			logger.Warn("Dado invalido descartado", "worker_id", id, "linha", raw.Linha, "campo", "idade")
+		s := raw.Schema
+
+		// Só o ID é obrigatório
+		if len(raw.Dados) <= s.IDTransacao {
+			logger.Warn("Linha ignorada: sem coluna de ID",
+				"worker_id", id, "linha", raw.Linha)
 			continue
 		}
 
-		status := strings.ToUpper(strings.TrimSpace(raw.Dados[9]))
+		idTransacao := strings.TrimSpace(raw.Dados[s.IDTransacao])
+		if idTransacao == "" {
+			continue
+		}
+
+		// Campos opcionais — usa valor default se a coluna não existir
+		cpfBruto := campoOpcional(raw.Dados, s.CPF)
+		status := strings.ToUpper(campoOpcional(raw.Dados, s.Status))
 		if status == "" {
-			continue
+			status = "DESCONHECIDO"
 		}
 
-		cpfBruto := raw.Dados[6]
+		idade := 0
+		if s.Idade >= 0 && s.Idade < len(raw.Dados) {
+			idadeStr := strings.TrimSpace(raw.Dados[s.Idade])
+			if v, err := strconv.Atoi(idadeStr); err == nil {
+				idade = v
+			}
+		}
+
 		cleanJobs <- domain.RegistroVarejo{
-			IDTransacao:      strings.TrimSpace(raw.Dados[0]),
+			IDTransacao:      idTransacao,
 			IdadeCliente:     idade,
 			StatusPagto:      status,
 			CPFMascarado:     MascararCPF(cpfBruto),
 			CPFCriptografado: CriptografarAES(cpfBruto, cfg.ChaveCifraAES),
 		}
 	}
+}
+
+// campoOpcional retorna o valor da coluna ou "" se o índice não existir.
+func campoOpcional(dados []string, idx int) string {
+	if idx < 0 || idx >= len(dados) {
+		return ""
+	}
+	return strings.TrimSpace(dados[idx])
 }
