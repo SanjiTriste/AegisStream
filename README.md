@@ -37,7 +37,7 @@ flowchart TD
     D2 ==>|Sanitized & Encrypted| F
     D3 ==>|Sanitized & Encrypted| F
     
-   ```
+   
     F --> G(Phase 3: Load)
     G -->|Batch Insert| H[(Database: SQLite/PgSQL)]
     H -.->|Idempotency: ON CONFLICT| H
